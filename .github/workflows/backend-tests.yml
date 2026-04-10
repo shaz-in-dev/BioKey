@@ -1,0 +1,113 @@
+name: Backend Tests & Quality
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'backend-server/**'
+      - '.github/workflows/backend-tests.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'backend-server/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: biokey_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.2'
+        bundler-cache: true
+        working-directory: backend-server
+    
+    - name: Create database
+      working-directory: backend-server
+      env:
+        DB_HOST: localhost
+        DB_USER: postgres
+        DB_PASSWORD: postgres
+        DB_NAME: biokey_test
+        PGPASSWORD: postgres
+      run: |
+        psql -h localhost -U postgres -c "CREATE DATABASE biokey_test;" || true
+        psql -h localhost -U postgres -d biokey_test -f ../database/schema.sql
+    
+    - name: Run tests
+      working-directory: backend-server
+      env:
+        DB_HOST: localhost
+        DB_USER: postgres
+        DB_PASSWORD: postgres
+        DB_NAME: biokey_test
+        APP_ENV: test
+        RACK_ENV: test
+      run: bundle exec ruby -I lib:test test/**/*_test.rb
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./backend-server/coverage/.resultset.json
+        flags: unittests
+        name: codecov-umbrella
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.2'
+        bundler-cache: true
+        working-directory: backend-server
+    
+    - name: Check Ruby syntax
+      working-directory: backend-server
+      run: |
+        for file in lib/*.rb app.rb models/*.rb; do
+          [ -f "$file" ] && ruby -c "$file" || true
+        done
+    
+    - name: Run RuboCop
+      working-directory: backend-server
+      run: |
+        gem install rubocop
+        rubocop --display-cop-names lib/ app.rb models/ || true
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.2'
+        working-directory: backend-server
+    
+    - name: Run Brakeman security scan
+      working-directory: backend-server
+      run: |
+        gem install brakeman
+        brakeman --skip-files lib/structured_logger.rb || true

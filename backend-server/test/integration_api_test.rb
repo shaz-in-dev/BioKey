@@ -58,6 +58,15 @@ class IntegrationApiTest < Minitest::Test
     assert_equal 200, last_response.status
     bio_body = parse_json(last_response.body)
     assert_includes %w[SUCCESS CHALLENGE DENIED], bio_body['status']
+        assert bio_body.key?('intelligence')
+
+        post '/v1/auth/intelligence', { timings: timings }.to_json,
+          { 'CONTENT_TYPE' => 'application/json', 'HTTP_AUTHORIZATION' => "Bearer #{token}" }
+        assert_equal 200, last_response.status
+        intel_body = parse_json(last_response.body)
+        assert_equal 'SUCCESS', intel_body['status']
+        assert intel_body['intelligence']['available']
+        assert_includes %w[low medium high], intel_body['intelligence']['risk_level']
 
     get '/admin/api/feed?limit=5', {}, { 'HTTP_X_ADMIN_TOKEN' => ENV.fetch('ADMIN_TOKEN') }
     assert_equal 200, last_response.status

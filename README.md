@@ -10,13 +10,13 @@ BioKey is a keystroke-dynamics biometric authentication prototype with:
 
 ## Repository Layout
 
-- `android-client/` — Android app (Kotlin + Compose)
-- `backend-server/` — Sinatra API + auth + dashboard + prototype routes
-- `database/` — schema + Docker compose for PostgreSQL
-- `native-engine/` — native biometric math module (legacy/optional)
-- `tools/` — generation/export/encryption scripts
-- `docs/` — dashboard and evaluation docs
-- `secure-backups/` — encrypted DB backups (`.enc`) safe to keep in repo
+- `android-client/`  Android app (Kotlin + Compose)
+- `backend-server/`  Sinatra API + auth + dashboard + prototype routes
+- `database/`  schema + Docker compose for PostgreSQL
+- `native-engine/`  native biometric math module (legacy/optional)
+- `tools/`  generation/export/encryption scripts
+- `docs/`  dashboard and evaluation docs
+- `secure-backups/`  encrypted DB backups (`.enc`) safe to keep in repo
 
 ## Prerequisites
 
@@ -69,6 +69,7 @@ Expected response: `Hello World`
 
 - `POST /v1/auth/register`
 - `POST /v1/auth/login`
+- `POST /v1/auth/intelligence`
 - `GET /v1/auth/profile`
 - `POST /v1/auth/refresh`
 - `POST /v1/auth/logout`
@@ -98,6 +99,17 @@ Responses include:
 
 - `X-Request-Id`
 - `X-Api-Version`
+
+### Intelligence Layer
+
+Biometric verification now includes an intelligence layer that computes:
+
+- entropy-based anomaly signals
+- temporal consistency signals
+- profile uniqueness and spoofability risk
+- action recommendation (`allow`, `challenge_or_monitor`, `step_up_auth`)
+
+The intelligence payload is included in `/v1/login` responses and is available as a standalone analysis endpoint at `/v1/auth/intelligence`.
 
 ## Synthetic Data Generation
 
@@ -143,7 +155,7 @@ Output location: `exports/db_backups/*.dump`
 ### 2) Encrypt dump (commit-safe)
 
 ```bash
-set DB_BACKUP_PASSPHRASE=your-strong-secret
+set DB_BACKUP_PASSPHRASE=replace-with-strong-secret
 ruby tools/encrypt_db_backup.rb exports/db_backups/biokey_db_YYYYMMDD_HHMMSS.dump
 ```
 
@@ -152,13 +164,13 @@ Encrypted output goes to `secure-backups/*.enc`.
 ### 3) Decrypt when needed
 
 ```bash
-set DB_BACKUP_PASSPHRASE=your-strong-secret
+set DB_BACKUP_PASSPHRASE=replace-with-strong-secret
 ruby tools/decrypt_db_backup.rb secure-backups/biokey_db_YYYYMMDD_HHMMSS.dump.enc
 ```
 
 Important:
 
-- Keep passphrase out of git (for example in local `.secrets/` or your password manager).
+- Keep passphrase out of git (for example in local `.secrets/` or a secure password manager).
 - `.secrets/` and `exports/` are ignored by `.gitignore`.
 
 ## Tests
@@ -199,6 +211,7 @@ On push/PR to `main`:
 - Dashboard control actions require admin session or `X-Admin-Token`.
 - Proxy trust is gated by `TRUST_PROXY=1`.
 - FAR/FRR report quality depends on labeled attempts (`GENUINE` / `IMPOSTER`).
+- Session tokens are stored as SHA-256 digests at rest (token hashing with pepper).
 
 ## Prototype Notice
 

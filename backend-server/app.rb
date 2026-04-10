@@ -11,6 +11,7 @@ require 'time'
 require_relative 'lib/auth_service'
 require_relative 'lib/dashboard_service'
 require_relative 'lib/evaluation_service'
+require_relative 'lib/advanced_biometric_analysis'
 
 class ApiVersionMiddleware
   def initialize(app)
@@ -45,6 +46,8 @@ AUTH_RATE_LIMIT_WINDOW_SECONDS = 60
 AUTH_LOCKOUT_THRESHOLD = 5
 AUTH_LOCKOUT_WINDOW_MINUTES = 15
 APP_BOOT_TIME = Time.now
+ENABLE_ADVANCED_INTELLIGENCE = ENV.fetch('ENABLE_ADVANCED_INTELLIGENCE', 'true') == 'true'
+SESSION_TOKEN_PEPPER = ENV['SESSION_TOKEN_PEPPER'] || 'biokey_session_token_pepper_change_me'
 
 RATE_LIMIT_MUTEX = Mutex.new
 RATE_LIMIT_BUCKETS = {}
@@ -488,6 +491,125 @@ def normalize_timing_sample(sample, index)
   nil
 end
 
+def normalized_timing_series(timings)
+  return [] unless timings.is_a?(Array)
+
+  timings.each_with_index.map do |t, idx|
+    sample = normalize_timing_sample(t, idx)
+    next nil if sample.nil?
+
+    {
+      'pair' => sample[:pair],
+      'dwell' => sample[:dwell],
+      'flight' => sample[:flight]
+    }
+  end.compact
+end
+
+def fetch_profile_rows(user_id)
+  result = DB.exec_params(
+    "SELECT key_pair, avg_dwell_time, avg_flight_time, std_dev_dwell, std_dev_flight, sample_count
+     FROM biometric_profiles
+     WHERE user_id = $1",
+    [user_id]
+  )
+
+  result.map do |row|
+    {
+      'key_pair' => row['key_pair'],
+      'avg_dwell_time' => row['avg_dwell_time'].to_f,
+      'avg_flight_time' => row['avg_flight_time'].to_f,
+      'std_dev_dwell' => row['std_dev_dwell'].to_f,
+      'std_dev_flight' => row['std_dev_flight'].to_f,
+      'sample_count' => row['sample_count'].to_i
+    }
+  end
+rescue PG::Error => e
+  $logger.warn "Unable to load profile rows for intelligence: #{e.message}"
+  []
+end
+
+def risk_level_for_signals(entropy_norm:, consistency_score:, spoofability_risk:, verification_status:)
+  score = 0
+  score += 2 if entropy_norm > 0.85
+  score += 1 if entropy_norm > 0.70
+  score += 2 if consistency_score < 0.35
+  score += 1 if consistency_score < 0.55
+  score += 2 if spoofability_risk == 'high'
+  score += 1 if spoofability_risk == 'medium'
+  score += 1 if verification_status == 'CHALLENGE'
+  score += 2 if verification_status == 'DENIED'
+
+  return 'high' if score >= 5
+  return 'medium' if score >= 3
+
+  'low'
+end
+
+def build_biometric_intelligence(user_id, timings, verification_result = nil)
+  normalized = normalized_timing_series(timings)
+  return { available: false, reason: 'no_valid_timing_samples' } if normalized.empty?
+
+  profile_rows = fetch_profile_rows(user_id)
+  entropy = AdvancedBiometricAnalysis.keystroke_entropy(normalized)
+  consistency = AdvancedBiometricAnalysis.temporal_consistency_analysis(normalized)
+  uniqueness = if profile_rows.empty?
+                 {
+                   uniqueness_score: nil,
+                   spoofability_risk: 'unknown'
+                 }
+               else
+                 AdvancedBiometricAnalysis.pattern_uniqueness_score(profile_rows)
+               end
+
+  verification_status = verification_result&.dig(:status)
+  risk_level = risk_level_for_signals(
+    entropy_norm: entropy[:entropy_normalized].to_f,
+    consistency_score: consistency[:consistency_score].to_f,
+    spoofability_risk: uniqueness[:spoofability_risk].to_s,
+    verification_status: verification_status.to_s
+  )
+
+  response = {
+    available: true,
+    risk_level: risk_level,
+    recommended_action: (risk_level == 'high' ? 'step_up_auth' : (risk_level == 'medium' ? 'challenge_or_monitor' : 'allow')),
+    entropy: {
+      total: entropy[:total_entropy].to_f.round(4),
+      normalized: entropy[:entropy_normalized].to_f.round(4)
+    },
+    temporal_consistency: {
+      score: consistency[:consistency_score].to_f.round(4),
+      avg_speed_change: consistency[:avg_speed_change].to_f.round(4)
+    },
+    profile_uniqueness: {
+      score: uniqueness[:uniqueness_score].nil? ? nil : uniqueness[:uniqueness_score].to_f.round(4),
+      spoofability_risk: uniqueness[:spoofability_risk]
+    },
+    sample_size: normalized.length
+  }
+
+  if verification_result.is_a?(Hash) && verification_result[:status]
+    thresholds = {
+      success: verification_result[:success_threshold].to_f,
+      challenge: verification_result[:challenge_threshold].to_f
+    }
+
+    if thresholds[:success] > 0 && thresholds[:challenge] > 0 && verification_result[:score]
+      response[:decision_explanation] = AdvancedBiometricAnalysis.explain_decision(
+        verification_result[:status].to_s,
+        verification_result[:score].to_f,
+        thresholds
+      )
+    end
+  end
+
+  response
+rescue => e
+  $logger.warn "Biometric intelligence failed for user #{user_id}: #{e.message}"
+  { available: false, reason: 'analysis_failed' }
+end
+
 def update_running_stats(old_mean, old_m2, old_count, new_value)
   new_count = old_count + 1
   delta = new_value - old_mean
@@ -634,6 +756,16 @@ post '/login' do
       return json_error(message, 422, 'BIOMETRIC_VALIDATION_FAILED', details)
     end
 
+    if ENABLE_ADVANCED_INTELLIGENCE
+      intelligence = build_biometric_intelligence(user_id, timings, result)
+      result[:intelligence] = intelligence
+
+      if result[:status] == 'SUCCESS' && intelligence[:risk_level] == 'high'
+        result[:status] = 'CHALLENGE'
+        result[:policy_override] = 'HIGH_RISK_SIGNALS'
+      end
+    end
+
     verdict_code = case result[:status]
              when 'SUCCESS' then 'BIO_OK'
              when 'CHALLENGE' then 'BIO_CHAL'
@@ -708,12 +840,30 @@ def revoke_user_sessions(user_id, except_token = nil)
   if except_token.nil?
     DB.exec_params('DELETE FROM user_sessions WHERE user_id = $1', [user_id])
   else
-    DB.exec_params('DELETE FROM user_sessions WHERE user_id = $1 AND session_token <> $2', [user_id, except_token])
+    candidates = session_token_candidates(except_token)
+    keep_a = candidates[0] || ''
+    keep_b = candidates[1] || keep_a
+    DB.exec_params(
+      'DELETE FROM user_sessions WHERE user_id = $1 AND session_token <> $2 AND session_token <> $3',
+      [user_id, keep_a, keep_b]
+    )
   end
 end
 
 def generate_session_token
   SecureRandom.hex(32)
+end
+
+def session_token_digest(token)
+  return nil if token.nil? || token.empty?
+
+  Digest::SHA256.hexdigest("#{SESSION_TOKEN_PEPPER}:#{token}")
+end
+
+def session_token_candidates(token)
+  return [] if token.nil? || token.empty?
+
+  [session_token_digest(token), token].compact.uniq
 end
 
 def bearer_token
@@ -726,13 +876,16 @@ end
 def active_session_for(token)
   return nil if token.nil? || token.empty?
 
+  candidates = session_token_candidates(token)
+  return nil if candidates.empty?
+
   result = DB.exec_params(
     "SELECT s.user_id, u.username
      FROM user_sessions s
      JOIN users u ON u.id = s.user_id
-     WHERE s.session_token = $1 AND s.expires_at > NOW()
+     WHERE (s.session_token = $1 OR s.session_token = $2) AND s.expires_at > NOW()
      LIMIT 1",
-    [token]
+    [candidates[0], candidates[1] || candidates[0]]
   )
 
   return nil if result.ntuples == 0
@@ -872,7 +1025,7 @@ post '/auth/login' do
 
     DB.exec_params(
       'INSERT INTO user_sessions (user_id, session_token, expires_at) VALUES ($1, $2, $3)',
-      [user_id, token, expires_at]
+      [user_id, session_token_digest(token), expires_at]
     )
 
     log_access_event(user_id: user_id, verdict: 'AUTH_OK', score: nil)
@@ -894,6 +1047,38 @@ post '/auth/login' do
   rescue => e
     $logger.error "Unknown error in /auth/login: #{e.message}"
     log_access_event(user_id: nil, verdict: 'AUTH_FAIL', score: nil)
+    json_error('Internal Server Error')
+  end
+end
+
+post '/auth/intelligence' do
+  content_type :json
+  begin
+    session = active_session_for(bearer_token)
+    return json_error('Unauthorized', 401) if session.nil?
+
+    data = JSON.parse(request.body.read)
+    timings = data['timings']
+    unless valid_timing_payload?(timings)
+      return json_error('Missing or invalid timings payload', 400, 'INVALID_TIMINGS')
+    end
+
+    user_id = session['user_id'].to_i
+    intelligence = build_biometric_intelligence(user_id, timings)
+    log_audit_event(event_type: 'auth_intelligence', actor: 'user', user_id: user_id, metadata: { available: intelligence[:available] })
+
+    json_success({
+      status: 'SUCCESS',
+      user_id: user_id,
+      intelligence: intelligence
+    })
+  rescue JSON::ParserError
+    json_error('Invalid JSON format', 400)
+  rescue PG::Error => e
+    $logger.error "Database error in /auth/intelligence: #{e.message}"
+    json_error('Database error')
+  rescue => e
+    $logger.error "Unknown error in /auth/intelligence: #{e.message}"
     json_error('Internal Server Error')
   end
 end
@@ -935,7 +1120,11 @@ post '/auth/logout' do
     end
 
     session = active_session_for(token)
-    DB.exec_params('DELETE FROM user_sessions WHERE session_token = $1', [token])
+    candidates = session_token_candidates(token)
+    DB.exec_params(
+      'DELETE FROM user_sessions WHERE session_token = $1 OR session_token = $2',
+      [candidates[0], candidates[1] || candidates[0]]
+    )
     log_access_event(user_id: session.nil? ? nil : session['user_id'].to_i, verdict: 'LOGOUT', score: nil)
     json_success({ status: 'SUCCESS', message: 'Logged out' })
   rescue PG::Error => e
@@ -970,9 +1159,10 @@ post '/auth/refresh' do
     new_token = generate_session_token
     new_expires_at = (Time.now + 24 * 60 * 60).utc
 
+    old_candidates = session_token_candidates(token)
     updated = DB.exec_params(
-      'UPDATE user_sessions SET session_token = $1, expires_at = $2 WHERE session_token = $3',
-      [new_token, new_expires_at, token]
+      'UPDATE user_sessions SET session_token = $1, expires_at = $2 WHERE session_token = $3 OR session_token = $4',
+      [session_token_digest(new_token), new_expires_at, old_candidates[0], old_candidates[1] || old_candidates[0]]
     )
 
     if updated.cmd_tuples == 0

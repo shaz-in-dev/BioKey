@@ -1,0 +1,465 @@
+openapi: 3.0.0
+info:
+  title: BioKey Authentication API
+  description: >
+    Production-grade keystroke-dynamics biometric authentication system.
+    Provides secure user registration, biometric verification, profile management, 
+    and advanced evaluation tooling.
+  version: 1.0.0
+  contact:
+    name: BioKey Development Team
+  license:
+    name: MIT
+
+servers:
+  - url: 'http://localhost:4567'
+    description: Development server
+  - url: 'https://api.biokey.example.com'
+    description: Production server
+
+paths:
+  /v1/auth/register:
+    post:
+      summary: Register a new user
+      operationId: registerUser
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                  minLength: 3
+                  maxLength: 50
+                  pattern: '^[a-zA-Z0-9_-]+$'
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+      responses:
+        '200':
+          description: User registered successfully
+          headers:
+            X-Request-Id:
+              schema:
+                type: string
+              description: Unique request identifier
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [SUCCESS]
+                  user_id:
+                    type: integer
+                  username:
+                    type: string
+        '400':
+          description: Invalid input or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Username already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limit exceeded
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+
+  /v1/auth/login:
+    post:
+      summary: Authenticate user with biometric data
+      operationId: login
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+                - typing_data
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+                typing_data:
+                  type: array
+                  description: Array of keystroke timing measurements
+                  items:
+                    type: object
+                    properties:
+                      pair:
+                        type: string
+                        description: Key pair identifier (e.g., 'ab', 'cd')
+                      dwell:
+                        type: number
+                        description: Time key was held down (ms)
+                      flight:
+                        type: number
+                        description: Time between key release and next key press (ms)
+      responses:
+        '200':
+          description: Authentication successful or challenged
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/LoginSuccess'
+                  - $ref: '#/components/schemas/LoginChallenge'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too many login attempts - account locked
+
+  /v1/auth/profile:
+    get:
+      summary: Get user profile
+      operationId: getProfile
+      tags:
+        - Authentication
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User profile retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          description: Unauthorized
+
+  /v1/auth/intelligence:
+    post:
+      summary: Analyze biometric risk signals from timing samples
+      operationId: analyzeAuthIntelligence
+      tags:
+        - Authentication
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - timings
+              properties:
+                timings:
+                  type: array
+                  minItems: 1
+                  description: Keystroke timing samples to analyze
+                  items:
+                    type: object
+                    properties:
+                      pair:
+                        type: string
+                      dwell:
+                        type: number
+                      flight:
+                        type: number
+      responses:
+        '200':
+          description: Risk intelligence generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [SUCCESS]
+                  user_id:
+                    type: integer
+                  intelligence:
+                    $ref: '#/components/schemas/BiometricIntelligence'
+        '400':
+          description: Invalid timing payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/train:
+    post:
+      summary: Train biometric profile with new samples
+      operationId: trainProfile
+      tags:
+        - Training
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - typing_samples
+              properties:
+                typing_samples:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+      responses:
+        '200':
+          description: Training samples processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  profile_updated:
+                    type: boolean
+                  samples_processed:
+                    type: integer
+
+  /admin/api/overview:
+    get:
+      summary: Get admin dashboard overview
+      operationId: getOverview
+      tags:
+        - Admin
+      security:
+        - sessionAuth: []
+      responses:
+        '200':
+          description: Dashboard overview data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_users:
+                    type: integer
+                  total_attempts:
+                    type: integer
+                  success_rate:
+                    type: number
+                  recent_activity:
+                    type: array
+
+  /admin/api/export-dataset:
+    post:
+      summary: Export authentication dataset
+      operationId: exportDataset
+      tags:
+        - Admin
+      security:
+        - sessionAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                format:
+                  type: string
+                  enum: [json, csv]
+                filters:
+                  type: object
+      responses:
+        '200':
+          description: Dataset exported
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  export_id:
+                    type: string
+                  download_url:
+                    type: string
+
+  /admin/api/run-evaluation:
+    post:
+      summary: Run biometric evaluation metrics
+      operationId: runEvaluation
+      tags:
+        - Admin
+      security:
+        - sessionAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Evaluation completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  far:
+                    type: number
+                    description: False Acceptance Rate
+                  frr:
+                    type: number
+                    description: False Rejection Rate
+                  eer:
+                    type: number
+                    description: Equal Error Rate
+                  accuracy:
+                    type: number
+
+components:
+  schemas:
+    Error:
+      type: object
+      required:
+        - status
+        - message
+        - code
+      properties:
+        status:
+          type: string
+          enum: [ERROR]
+        message:
+          type: string
+        code:
+          type: string
+        details:
+          type: object
+
+    LoginSuccess:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [SUCCESS]
+        score:
+          type: number
+          format: double
+        matched_pairs:
+          type: integer
+        coverage_ratio:
+          type: number
+        token:
+          type: string
+          description: JWT bearer token
+        intelligence:
+          $ref: '#/components/schemas/BiometricIntelligence'
+
+    LoginChallenge:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [CHALLENGE]
+        score:
+          type: number
+        challenge_token:
+          type: string
+          description: Token for secondary verification
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        profile_trained:
+          type: boolean
+        key_pairs_trained:
+          type: integer
+
+    BiometricIntelligence:
+      type: object
+      properties:
+        available:
+          type: boolean
+        risk_level:
+          type: string
+          enum: [low, medium, high]
+        recommended_action:
+          type: string
+          enum: [allow, challenge_or_monitor, step_up_auth]
+        sample_size:
+          type: integer
+        entropy:
+          type: object
+          properties:
+            total:
+              type: number
+            normalized:
+              type: number
+        temporal_consistency:
+          type: object
+          properties:
+            score:
+              type: number
+            avg_speed_change:
+              type: number
+        profile_uniqueness:
+          type: object
+          properties:
+            score:
+              type: number
+              nullable: true
+            spoofability_risk:
+              type: string
+        decision_explanation:
+          type: object
+          nullable: true
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    sessionAuth:
+      type: apiKey
+      in: cookie
+      name: session_id
+
+tags:
+  - name: Authentication
+    description: User authentication and profile management
+  - name: Training
+    description: Biometric profile training endpoints
+  - name: Admin
+    description: Administration and evaluation endpoints
+  - name: Prototype
+    description: Experimental features for the typing-capture prototype

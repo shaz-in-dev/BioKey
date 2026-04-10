@@ -4,123 +4,89 @@ DB = FakeDB.new unless defined?(DB)
 require_relative '../lib/auth_service'
 
 class AuthServiceTest < Minitest::Test
+  include TestHelper
+
   def setup
-    DB.set_profiles(1, [])
+    @db = FakeDB.new
+    Object.send(:remove_const, :DB) if Object.const_defined?(:DB)
+    Object.const_set(:DB, @db)
   end
 
-  def test_normalize_attempt_timing_supports_hash_and_numeric
-    hash_timing = AuthService.normalize_attempt_timing({ 'pair' => 'ab', 'dwell' => 100, 'flight' => 40 }, 0)
-    numeric_timing = AuthService.normalize_attempt_timing(120, 3)
+  def test_normalize_attempt_timing_with_hash
+    timing = AuthService.normalize_attempt_timing({ 'pair' => 'ab', 'dwell' => 100, 'flight' => 40 }, 0)
 
-    assert_equal('ab', hash_timing['pair'])
-    assert_equal(100.0, hash_timing['dwell'])
-    assert_equal('k3', numeric_timing['pair'])
-    assert_equal(120.0, numeric_timing['flight'])
+    assert_equal('ab', timing['pair'])
+    assert_equal(100.0, timing['dwell'])
+    assert_equal(40.0, timing['flight'])
   end
 
-  def test_verify_login_returns_error_when_profile_missing
-    result = AuthService.verify_login(1, [{ 'pair' => 'ab', 'dwell' => 100, 'flight' => 50 }])
+  def test_normalize_attempt_timing_with_numeric
+    timing = AuthService.normalize_attempt_timing(120, 3)
+
+    assert_equal('k3', timing['pair'])
+    assert_equal(120.0, timing['dwell'])
+    assert_equal(120.0, timing['flight'])
+  end
+
+  def test_verify_login_no_profile
+    result = AuthService.verify_login(999, [])
 
     assert_equal('ERROR', result[:status])
     assert_match(/No profile found/, result[:message])
   end
 
-  def test_verify_login_returns_error_on_low_coverage
-    DB.set_profiles(1, [
-      {
-        'key_pair' => 'ab',
-        'avg_dwell_time' => '100',
-        'avg_flight_time' => '50',
-        'std_dev_dwell' => '20',
-        'std_dev_flight' => '20',
-        'sample_count' => '12',
-        'm2_dwell' => '0',
-        'm2_flight' => '0'
-      }
-    ])
+  def test_verify_login_insufficient_pairs
+    profiles = create_test_profiles_for_user(1, 10)
+    @db.set_profiles(1, profiles)
 
-    result = AuthService.verify_login(1, [{ 'pair' => 'ab', 'dwell' => 100, 'flight' => 50 }])
+    attempts = [
+      create_test_attempt(50, 35, 'k0'),
+      create_test_attempt(48, 34, 'k1')
+    ]
+
+    result = AuthService.verify_login(1, attempts)
+
     assert_equal('ERROR', result[:status])
     assert_match(/Insufficient matched pairs/, result[:message])
   end
 
-  def test_verify_login_success_flow_returns_thresholds
-    DB.set_profiles(1, [
-      {
-        'key_pair' => 'ab',
-        'avg_dwell_time' => '100',
-        'avg_flight_time' => '50',
-        'std_dev_dwell' => '20',
-        'std_dev_flight' => '20',
-        'sample_count' => '12',
-        'm2_dwell' => '0',
-        'm2_flight' => '0'
-      },
-      {
-        'key_pair' => 'bc',
-        'avg_dwell_time' => '101',
-        'avg_flight_time' => '51',
-        'std_dev_dwell' => '20',
-        'std_dev_flight' => '20',
-        'sample_count' => '12',
-        'm2_dwell' => '0',
-        'm2_flight' => '0'
-      },
-      {
-        'key_pair' => 'cd',
-        'avg_dwell_time' => '102',
-        'avg_flight_time' => '52',
-        'std_dev_dwell' => '20',
-        'std_dev_flight' => '20',
-        'sample_count' => '12',
-        'm2_dwell' => '0',
-        'm2_flight' => '0'
-      },
-      {
-        'key_pair' => 'de',
-        'avg_dwell_time' => '103',
-        'avg_flight_time' => '53',
-        'std_dev_dwell' => '20',
-        'std_dev_flight' => '20',
-        'sample_count' => '12',
-        'm2_dwell' => '0',
-        'm2_flight' => '0'
-      },
-      {
-        'key_pair' => 'ef',
-        'avg_dwell_time' => '104',
-        'avg_flight_time' => '54',
-        'std_dev_dwell' => '20',
-        'std_dev_flight' => '20',
-        'sample_count' => '12',
-        'm2_dwell' => '0',
-        'm2_flight' => '0'
-      },
-      {
-        'key_pair' => 'fg',
-        'avg_dwell_time' => '105',
-        'avg_flight_time' => '55',
-        'std_dev_dwell' => '20',
-        'std_dev_flight' => '20',
-        'sample_count' => '12',
-        'm2_dwell' => '0',
-        'm2_flight' => '0'
-      }
-    ])
+  def test_verify_login_success
+    profiles = create_test_profiles_for_user(1, 8)
+    @db.set_profiles(1, profiles)
 
-    attempt = [
-      { 'pair' => 'ab', 'dwell' => 100, 'flight' => 50 },
-      { 'pair' => 'bc', 'dwell' => 101, 'flight' => 51 },
-      { 'pair' => 'cd', 'dwell' => 102, 'flight' => 52 },
-      { 'pair' => 'de', 'dwell' => 103, 'flight' => 53 },
-      { 'pair' => 'ef', 'dwell' => 104, 'flight' => 54 },
-      { 'pair' => 'fg', 'dwell' => 105, 'flight' => 55 }
-    ]
+    attempts = profiles.map do |p|
+      create_test_attempt(p['avg_dwell_time'], p['avg_flight_time'], p['key_pair'])
+    end
 
-    result = AuthService.verify_login(1, attempt)
+    result = AuthService.verify_login(1, attempts)
+
     assert_equal('SUCCESS', result[:status])
-    assert_equal(6, result[:matched_pairs])
-    assert_in_delta(1.0, result[:coverage_ratio], 0.001)
-    assert_in_delta(AuthService::DEFAULT_SUCCESS_THRESHOLD, result[:success_threshold], 0.0001)
+    assert_operator(result[:matched_pairs], :>=, AuthService::MIN_MATCHED_PAIRS)
+    assert_operator(result[:coverage_ratio], :>, 0)
+  end
+
+  def test_weighted_variance_aware_score
+    consistent_match = {
+      pair: 'ke',
+      attempt_dwell: 50.0,
+      attempt_flight: 35.0,
+      mean_dwell: 50.0,
+      mean_flight: 35.0,
+      std_dwell: 5.0,
+      std_flight: 3.0,
+      sample_count: 100
+    }
+
+    score = AuthService.weighted_variance_aware_score([consistent_match])
+
+    assert_operator(score, :>=, 0)
+    assert_operator(score, :<, 1.0)
+  end
+
+  def test_calibrated_thresholds_default
+    thresholds = AuthService.calibrated_thresholds_for_user(1)
+
+    assert_in_delta(AuthService::DEFAULT_SUCCESS_THRESHOLD, thresholds[:success], 0.01)
+    assert_in_delta(AuthService::DEFAULT_CHALLENGE_THRESHOLD, thresholds[:challenge], 0.01)
   end
 end

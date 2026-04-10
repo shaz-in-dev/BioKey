@@ -1,21 +1,39 @@
 source 'https://rubygems.org'
 
-# The lightweight web framework for our API
-gem 'sinatra'
+ruby '~> 3.0'
 
-# For creating JSON responses for the Android app
-gem 'json'
-gem 'csv'
+# Web Framework
+gem 'sinatra', '~> 4.0'
+gem 'sinatra-contrib', '~> 4.0'  # For extensions
+gem 'puma', '~> 7.2'
+gem 'rackup', '~> 2.3'
 
-# The Foreign Function Interface to call our C Math Engine
-gem 'ffi'
+# Data & Serialization
+gem 'json', '~> 2.6'
+gem 'csv', '~> 3.2'
+gem 'pg', '~> 1.5', require: 'pg'
 
-# The PostgreSQL driver to talk to our SQL database
-gem 'pg'
-gem 'bcrypt'
-gem 'minitest', group: :test
+# Security & Authentication
+gem 'bcrypt', '~> 3.1'
+gem 'dotenv', '~> 2.8'  # Environment variable management
+gem 'securerandom'
 
-# Optional: For better development logging
-gem 'rack-test', group: :test
-gem "rackup", "~> 2.3"
-gem "puma", "~> 7.2"
+# Native Extensions
+gem 'ffi', '~> 1.15'
+
+# Testing
+group :test do
+  gem 'minitest', '~> 5.18'
+  gem 'rack-test', '~> 2.1'
+  gem 'mocha', '~> 2.0'  # For mocking
+end
+
+# Development
+group :development do
+  gem 'pry', '~> 0.14'  # REPL for debugging
+  gem 'ruby-lsp', '~> 0.14'  # Language server
+end
+
+# Production monitoring (optional, can enable later)
+# gem 'prometheus-client', '~> 4.0'
+# gem 'sentry-ruby', '~> 5.0'
